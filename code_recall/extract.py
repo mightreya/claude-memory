@@ -6,10 +6,10 @@ Shared by daemon.py, reingest.py, and ingest.py.
 - hybrid_search() does dense+sparse retrieval with RRF fusion
 """
 
-import functools
 import json
 import logging
 import os
+import threading
 from datetime import datetime
 
 import httpx
@@ -69,6 +69,9 @@ _RESPONSE_SCHEMA = {
 
 _MAX_RETRIES = 1
 _client: genai.Client | None = None
+_client_lock = threading.Lock()
+_sparse_model: SparseTextEmbedding | None = None
+_sparse_model_lock = threading.Lock()
 
 
 def hybrid_search(
@@ -246,18 +249,22 @@ def parse_timestamp(timestamp: str) -> datetime | None:
 
 
 def _get_client() -> genai.Client:
-    """Lazy-init Gemini client."""
+    """Lazy-init Gemini client (thread-safe)."""
     global _client
-    if _client is None:
-        _client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-    return _client
+    with _client_lock:
+        if _client is None:
+            _client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+        return _client
 
 
-@functools.cache
 def _get_sparse_model() -> SparseTextEmbedding:
-    """Lazy-init fastembed BM25 sparse text embedding model."""
-    logger.info("Loading fastembed BM25 sparse model")
-    return SparseTextEmbedding(model_name="Qdrant/bm25")
+    """Lazy-init fastembed BM25 sparse text embedding model (thread-safe)."""
+    global _sparse_model
+    with _sparse_model_lock:
+        if _sparse_model is None:
+            logger.info("Loading fastembed BM25 sparse model")
+            _sparse_model = SparseTextEmbedding(model_name="Qdrant/bm25")
+        return _sparse_model
 
 
 def _parse_response(response) -> dict | None:
