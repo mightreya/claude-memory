@@ -16,9 +16,10 @@ import httpx
 from fastembed import SparseTextEmbedding
 from google import genai
 from google.genai import types
+from sentence_transformers import CrossEncoder
 
 from code_recall._mem0 import OLLAMA_URL, QDRANT_URL
-from code_recall.prompts import WORKFLOW_STATE_PROMPT, build_prompt
+from code_recall.prompts import build_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ _MIN_UNIQUE_WORDS = 15
 _DEDUP_COSINE_WEIGHT = 0.7
 _DEDUP_JACCARD_WEIGHT = 0.3
 _PREFETCH_LIMIT = 20
+_RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 _EXPAND_PROMPT = (
     "Rewrite this search query 3 different ways to capture different vocabulary. "
     "Resolve any pronouns using context. Return a JSON array of strings.\nQuery: {query}"
@@ -72,6 +74,7 @@ _client: genai.Client | None = None
 _client_lock = threading.Lock()
 _sparse_model: SparseTextEmbedding | None = None
 _sparse_model_lock = threading.Lock()
+_cross_encoder: CrossEncoder | None = None
 
 
 def hybrid_search(
@@ -104,12 +107,14 @@ def hybrid_search(
     if not prefetch:
         return []
 
+    rrf_limit = max(limit, _PREFETCH_LIMIT)
     response = httpx.post(
         f"{QDRANT_URL}/collections/{collection}/points/query",
-        json={"prefetch": prefetch, "query": {"fusion": "rrf"}, "limit": limit, "with_payload": True},
+        json={"prefetch": prefetch, "query": {"fusion": "rrf"}, "limit": rrf_limit, "with_payload": True},
     )
     points = response.json().get("result", {}).get("points", [])
-    return points
+    reranked = _rerank(query, points, limit)
+    return reranked
 
 
 def extract_facts(text: str, domain: str, reference_date: datetime | None = None) -> list[dict]:
@@ -165,28 +170,6 @@ def extract_facts(text: str, domain: str, reference_date: datetime | None = None
 
     logger.debug("Extracted %d facts (%d passed filter) from %d chars", len(facts), len(filtered), len(text))
     return filtered
-
-
-def extract_workflow_state(text: str) -> str:
-    """Extract structured workflow state from conversation text using Gemini.
-
-    Returns raw markdown string suitable for WORKFLOW_STATE.md.
-    Unlike extract_facts(), no JSON schema — Gemini returns free-form markdown.
-    """
-    if not text or len(text.strip()) < 50:
-        return ""
-
-    client = _get_client()
-    config = types.GenerateContentConfig(
-        system_instruction=WORKFLOW_STATE_PROMPT,
-        temperature=0,
-        max_output_tokens=2048,
-    )
-    contents = [types.Content(parts=[types.Part(text=text)], role="user")]
-    response = client.models.generate_content(model=_MODEL, contents=contents, config=config)
-    raw_text = response.candidates[0].content.parts[0].text if response.candidates else ""
-    state = raw_text.strip()
-    return state
 
 
 def store_facts(
@@ -389,3 +372,24 @@ def _jaccard_word_overlap(text_a: str, text_b: str) -> float:
     intersection = len(words_a & words_b)
     union = len(words_a | words_b)
     return intersection / union
+
+
+def _get_reranker() -> CrossEncoder:
+    """Lazy-load the cross-encoder reranker model on first search."""
+    global _cross_encoder
+    if _cross_encoder is None:
+        _cross_encoder = CrossEncoder(_RERANKER_MODEL)
+        logger.info("loaded reranker model: %s", _RERANKER_MODEL)
+    return _cross_encoder
+
+
+def _rerank(query: str, points: list[dict], top_k: int) -> list[dict]:
+    """Rerank search results using a cross-encoder for higher relevance precision."""
+    if not points:
+        return points
+    reranker = _get_reranker()
+    pairs = [[query, point.get("payload", {}).get("data", "")] for point in points]
+    scores = reranker.predict(pairs)
+    ranked = sorted(zip(points, scores), key=lambda pair: pair[1], reverse=True)
+    top_results = [point for point, _score in ranked[:top_k]]
+    return top_results

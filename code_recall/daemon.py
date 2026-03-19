@@ -8,20 +8,13 @@ Endpoints:
 
 import json
 import logging
-import os
-import tempfile
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from pathlib import Path
 from threading import Thread
-
-import httpx
-from google.genai.errors import APIError
 
 from code_recall._mem0 import build_memory
 from code_recall.extract import (
     extract_facts,
-    extract_workflow_state,
     hybrid_search,
     parse_timestamp,
     store_facts,
@@ -63,8 +56,6 @@ class _Handler(BaseHTTPRequestHandler):
             self._handle_search(body)
         elif self.path == "/add":
             self._handle_add(body)
-        elif self.path == "/capture-state":
-            self._handle_capture_state(body)
         else:
             self._respond(404, "not found")
 
@@ -102,22 +93,6 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         Thread(target=_add_memory, args=(params,), daemon=True).start()
-        self._respond(204, "")
-
-    def _handle_capture_state(self, body: str) -> None:
-        try:
-            data = json.loads(body)
-            text = data.get("text", "")
-            workspace = data.get("workspace", "")
-        except (json.JSONDecodeError, AttributeError):
-            self._respond(400, "invalid json")
-            return
-
-        if not text or not workspace:
-            self._respond(400, "text and workspace required")
-            return
-
-        Thread(target=_capture_workflow_state, args=(text, workspace), daemon=True).start()
         self._respond(204, "")
 
     def _respond(self, code: int, body: str) -> None:
@@ -181,37 +156,6 @@ def _add_memory(params: dict) -> None:
         )
     except Exception:
         logger.exception("Failed to capture memory for %s", params.get("collection", "unknown"))
-
-
-def _capture_workflow_state(text: str, workspace: str) -> None:
-    """Extract workflow state via Gemini and write to WORKFLOW_STATE.md atomically."""
-    try:
-        state = extract_workflow_state(text)
-    except (APIError, httpx.HTTPError):
-        logger.exception("Gemini extraction failed for %s", workspace)
-        return
-
-    if not state or state.strip() == "No active workflow.":
-        logger.info("No active workflow detected, skipping state write")
-        return
-
-    target = Path(workspace) / "WORKFLOW_STATE.md"
-    tmp_path = ""
-    try:
-        fd, tmp_path = tempfile.mkstemp(dir=workspace, suffix=".tmp")
-        with os.fdopen(fd, "w") as handle:
-            handle.write(state)
-        os.rename(tmp_path, target)
-    except OSError:
-        logger.exception("Failed to write workflow state to %s", target)
-        if tmp_path:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-        return
-
-    logger.info("Wrote workflow state to %s (%d chars)", target, len(state))
 
 
 def main() -> None:

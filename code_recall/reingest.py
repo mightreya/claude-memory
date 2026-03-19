@@ -75,7 +75,8 @@ def main() -> None:
         _save_resume_mtime(path.stat().st_mtime)
         logger.info(
             "  [%d/%d] %s → %d facts",
-            index + 1, len(transcripts),
+            index + 1,
+            len(transcripts),
             path.parent.name[:20] + "/" + path.name[:12],
             count,
         )
