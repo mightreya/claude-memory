@@ -175,8 +175,8 @@ systemctl --user enable --now code-recall-consolidate.timer
 
 ```
 User prompt ──→ recall.sh ──→ POST /search ──→ Qdrant (dense + BM25 hybrid)
-  (jq + curl)    ~200ms         daemon
-  injects <memory-context>
+  (jq + curl)    ~500ms         daemon         → RRF fusion (top 20)
+  injects <memory-context>                     → cross-encoder rerank (top K)
 
 Session end ──→ capture.sh ──→ POST /add ──→ Gemini (extraction)
   (jq + curl)     ~50ms          daemon     → Ollama BGE-M3 (embedding)
@@ -184,7 +184,7 @@ Session end ──→ capture.sh ──→ POST /add ──→ Gemini (extractio
                                             → Mem0 (deduplication)
 ```
 
-- **Recall** runs before every prompt. Performs hybrid search (semantic embeddings + BM25 keyword matching) via Reciprocal Rank Fusion and injects matching memories.
+- **Recall** runs before every prompt. Performs hybrid search (semantic embeddings + BM25 keyword matching) via Reciprocal Rank Fusion, reranks results with a cross-encoder for relevance precision, and injects matching memories.
 - **Capture** runs after every session. Extracts the last 10 messages from the transcript, sends them to Gemini for structured fact extraction with quality scoring. Low-specificity and ephemeral facts are filtered out.
 - **Fail-open**: both hooks exit 0 on any error. A dead daemon never breaks Claude Code.
 
